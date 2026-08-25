@@ -20,6 +20,19 @@ public:
     int load(const std::string& modeldir);
 #endif
 
+    struct ModelData {
+        const char* param_text;     // .param file contents (text)
+        int param_size;
+        const unsigned char* bin_data;  // .bin file contents (binary weights)
+        int bin_size;
+    };
+
+    // load model from memory (no disk access)
+    // flownet_data required; contextnet_data + fusionnet_data for v1-v3
+    int load_from_memory(const ModelData& flownet_data,
+                         const ModelData* contextnet_data = 0,
+                         const ModelData* fusionnet_data = 0);
+
     int process(const ncnn::Mat& in0image, const ncnn::Mat& in1image, float timestep, ncnn::Mat& outimage) const;
 
     int process_cpu(const ncnn::Mat& in0image, const ncnn::Mat& in1image, float timestep, ncnn::Mat& outimage) const;

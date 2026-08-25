@@ -42,15 +42,16 @@ if(OPENMP_FOUND)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
 
-# enable global link time optimization
-cmake_policy(SET CMP0069 NEW)
-set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported OUTPUT ipo_supported_output)
-if(ipo_supported)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-else()
-    message(WARNING "IPO is not supported: ${ipo_supported_output}")
+# link time optimization (disabled by default for fast builds)
+option(ENABLE_LTO "enable link time optimization" OFF)
+if(ENABLE_LTO)
+    cmake_policy(SET CMP0069 NEW)
+    set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_supported_output)
+    if(ipo_supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
 if(USE_SYSTEM_NCNN)
@@ -291,3 +292,21 @@ if(USE_STATIC_MOLTENVK)
 endif()
 
 target_link_libraries(rife-ncnn-vulkan ${RIFE_LINK_LIBRARIES})
+
+# worker binary — connects to master, processes frames with pipelined GPU queues
+add_executable(rife-ncnn-vulkan-worker
+    worker.cpp
+    rife.cpp
+    warp.cpp
+)
+
+add_dependencies(rife-ncnn-vulkan-worker generate-spirv)
+
+target_link_libraries(rife-ncnn-vulkan-worker ${RIFE_LINK_LIBRARIES})
+
+# master binary — distributes frames to workers over LAN, saves results to disk
+add_executable(rife-ncnn-vulkan-master
+    master.cpp
+)
+
+target_link_libraries(rife-ncnn-vulkan-master webp ${CMAKE_THREAD_LIBS_INIT})

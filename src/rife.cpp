@@ -130,10 +130,10 @@ int RIFE::load(const std::string& modeldir)
     ncnn::Option opt;
     opt.num_threads = num_threads;
     opt.use_vulkan_compute = vkdev ? true : false;
-    opt.use_fp16_packed = vkdev ? true : false;
-    opt.use_fp16_storage = vkdev ? true : false;
+    opt.use_fp16_packed = false;
+    opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
-    opt.use_int8_storage = true;
+    opt.use_int8_storage = false;
 
     flownet.opt = opt;
     contextnet.opt = opt;
@@ -353,6 +353,193 @@ int RIFE::load(const std::string& modeldir)
     if (rife_v4)
     {
         if (vkdev)
+        {
+            static std::vector<uint32_t> spirv;
+            static ncnn::Mutex lock;
+            {
+                ncnn::MutexLockGuard guard(lock);
+                if (spirv.empty())
+                {
+                    if (tta_mode)
+                        compile_spirv_module(rife_v4_timestep_tta_comp_data, sizeof(rife_v4_timestep_tta_comp_data), opt, spirv);
+                    else
+                        compile_spirv_module(rife_v4_timestep_comp_data, sizeof(rife_v4_timestep_comp_data), opt, spirv);
+                }
+            }
+
+            std::vector<ncnn::vk_specialization_type> specializations;
+
+            rife_v4_timestep = new ncnn::Pipeline(vkdev);
+            rife_v4_timestep->set_optimal_local_size_xyz(8, 8, 1);
+            rife_v4_timestep->create(spirv.data(), spirv.size() * 4, specializations);
+        }
+    }
+
+    return 0;
+}
+
+int RIFE::load_from_memory(const ModelData& flownet_data, const ModelData* contextnet_data, const ModelData* fusionnet_data)
+{
+    ncnn::Option opt;
+    opt.num_threads = num_threads;
+    opt.use_vulkan_compute = vkdev ? true : false;
+    opt.use_fp16_packed = false;
+    opt.use_fp16_storage = false;
+    opt.use_fp16_arithmetic = false;
+    opt.use_int8_storage = false;
+
+    flownet.opt = opt;
+    contextnet.opt = opt;
+    fusionnet.opt = opt;
+
+    flownet.set_vulkan_device(vkdev);
+    contextnet.set_vulkan_device(vkdev);
+    fusionnet.set_vulkan_device(vkdev);
+
+    flownet.register_custom_layer("rife.Warp", Warp_layer_creator);
+    contextnet.register_custom_layer("rife.Warp", Warp_layer_creator);
+    fusionnet.register_custom_layer("rife.Warp", Warp_layer_creator);
+
+    flownet.load_param_mem(flownet_data.param_text);
+    flownet.load_model(flownet_data.bin_data);
+
+    if (!rife_v4 && contextnet_data && fusionnet_data)
+    {
+        contextnet.load_param_mem(contextnet_data->param_text);
+        contextnet.load_model(contextnet_data->bin_data);
+
+        fusionnet.load_param_mem(fusionnet_data->param_text);
+        fusionnet.load_model(fusionnet_data->bin_data);
+    }
+
+    // initialize preprocess and postprocess pipeline
+    if (vkdev)
+    {
+        std::vector<ncnn::vk_specialization_type> specializations(1);
+#if _WIN32
+        specializations[0].i = 1;
+#else
+        specializations[0].i = 0;
+#endif
+
+        {
+            std::vector<uint32_t> spirv;
+            if (tta_mode || tta_temporal_mode)
+                compile_spirv_module(rife_preproc_tta_comp_data, sizeof(rife_preproc_tta_comp_data), opt, spirv);
+            else
+                compile_spirv_module(rife_preproc_comp_data, sizeof(rife_preproc_comp_data), opt, spirv);
+
+            rife_preproc = new ncnn::Pipeline(vkdev);
+            rife_preproc->set_optimal_local_size_xyz(8, 8, 3);
+            rife_preproc->create(spirv.data(), spirv.size() * 4, specializations);
+        }
+
+        {
+            std::vector<uint32_t> spirv;
+            if (tta_mode || tta_temporal_mode)
+                compile_spirv_module(rife_postproc_tta_comp_data, sizeof(rife_postproc_tta_comp_data), opt, spirv);
+            else
+                compile_spirv_module(rife_postproc_comp_data, sizeof(rife_postproc_comp_data), opt, spirv);
+
+            rife_postproc = new ncnn::Pipeline(vkdev);
+            rife_postproc->set_optimal_local_size_xyz(8, 8, 3);
+            rife_postproc->create(spirv.data(), spirv.size() * 4, specializations);
+        }
+
+        if (tta_mode)
+        {
+            std::vector<uint32_t> spirv;
+            if (rife_v4)
+                compile_spirv_module(rife_v4_flow_tta_avg_comp_data, sizeof(rife_v4_flow_tta_avg_comp_data), opt, spirv);
+            else if (rife_v2)
+                compile_spirv_module(rife_v2_flow_tta_avg_comp_data, sizeof(rife_v2_flow_tta_avg_comp_data), opt, spirv);
+            else
+                compile_spirv_module(rife_flow_tta_avg_comp_data, sizeof(rife_flow_tta_avg_comp_data), opt, spirv);
+
+            rife_flow_tta_avg = new ncnn::Pipeline(vkdev);
+            rife_flow_tta_avg->set_optimal_local_size_xyz(8, 8, 1);
+            rife_flow_tta_avg->create(spirv.data(), spirv.size() * 4, specializations);
+        }
+
+        if (tta_temporal_mode)
+        {
+            std::vector<uint32_t> spirv;
+            if (rife_v4)
+                compile_spirv_module(rife_v4_flow_tta_temporal_avg_comp_data, sizeof(rife_v4_flow_tta_temporal_avg_comp_data), opt, spirv);
+            else if (rife_v2)
+                compile_spirv_module(rife_v2_flow_tta_temporal_avg_comp_data, sizeof(rife_v2_flow_tta_temporal_avg_comp_data), opt, spirv);
+            else
+                compile_spirv_module(rife_flow_tta_temporal_avg_comp_data, sizeof(rife_flow_tta_temporal_avg_comp_data), opt, spirv);
+
+            rife_flow_tta_temporal_avg = new ncnn::Pipeline(vkdev);
+            rife_flow_tta_temporal_avg->set_optimal_local_size_xyz(8, 8, 1);
+            rife_flow_tta_temporal_avg->create(spirv.data(), spirv.size() * 4, specializations);
+
+            {
+                std::vector<uint32_t> spirv;
+                compile_spirv_module(rife_out_tta_temporal_avg_comp_data, sizeof(rife_out_tta_temporal_avg_comp_data), opt, spirv);
+
+                rife_out_tta_temporal_avg = new ncnn::Pipeline(vkdev);
+                rife_out_tta_temporal_avg->set_optimal_local_size_xyz(8, 8, 3);
+                rife_out_tta_temporal_avg->create(spirv.data(), spirv.size() * 4, specializations);
+            }
+        }
+
+        if (uhd_mode)
+        {
+            rife_uhd_downscale_image = ncnn::create_layer("ncnn.Interp");
+            {
+                ncnn::ParamDict pd;
+                pd.set(0, 1);    // resize_type = bilinear
+                pd.set(1, 0.5f); // scale
+                pd.set(2, -233); // sy
+                pd.set(3, -233); // sx
+                pd.set(4, -233); // dy
+                pd.set(5, -233); // dx
+                rife_uhd_downscale_image->load_param(pd);
+            }
+            rife_uhd_downscale_image->vkdev = vkdev;
+            rife_uhd_downscale_image->load_model(ncnn::ModelBinFromMatArray(0));
+
+            rife_uhd_upscale_flow = ncnn::create_layer("ncnn.Interp");
+            {
+                ncnn::ParamDict pd;
+                pd.set(0, 1);    // resize_type = bilinear
+                pd.set(1, 2.0f); // scale
+                pd.set(2, -233); // sy
+                pd.set(3, -233); // sx
+                pd.set(4, -233); // dy
+                pd.set(5, -233); // dx
+                rife_uhd_upscale_flow->load_param(pd);
+            }
+            rife_uhd_upscale_flow->vkdev = vkdev;
+            rife_uhd_upscale_flow->load_model(ncnn::ModelBinFromMatArray(0));
+
+            rife_uhd_double_flow = ncnn::create_layer("ncnn.BinaryOp");
+            {
+                ncnn::ParamDict pd;
+                pd.set(0, 1); // op_type = mul
+                pd.set(1, 1); // with_scalar
+                pd.set(15, 2.0f); // scalar
+                rife_uhd_double_flow->load_param(pd);
+            }
+            rife_uhd_double_flow->vkdev = vkdev;
+            rife_uhd_double_flow->load_model(ncnn::ModelBinFromMatArray(0));
+        }
+
+        if (rife_v2)
+        {
+            rife_v2_slice_flow = ncnn::create_layer("ncnn.Slice");
+            {
+                ncnn::ParamDict pd;
+                // default slice params: split 4-channel into two 2-channel
+                rife_v2_slice_flow->load_param(pd);
+            }
+            rife_v2_slice_flow->vkdev = vkdev;
+            rife_v2_slice_flow->load_model(ncnn::ModelBinFromMatArray(0));
+        }
+
+        if (rife_v4)
         {
             static std::vector<uint32_t> spirv;
             static ncnn::Mutex lock;
