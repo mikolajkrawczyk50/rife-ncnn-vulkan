@@ -134,6 +134,7 @@ int RIFE::load(const std::string& modeldir)
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
     opt.use_int8_storage = false;
+    opt.use_winograd_convolution = false;
 
     flownet.opt = opt;
     contextnet.opt = opt;
@@ -4562,10 +4563,10 @@ int RIFE::process_v4_cpu(const ncnn::Mat& in0image, const ncnn::Mat& in1image, f
             for (int q = 0; q < 3; q++)
             {
                 float* outptr = out.channel(q);
-                const float* ptr = out_padded.channel(q);
 
                 for (int i = 0; i < h; i++)
                 {
+                    const float* ptr = out_padded.channel(q).row(i);
                     for (int j = 0; j < w; j++)
                     {
                         *outptr++ = *ptr++ * 255.f + 0.5f;

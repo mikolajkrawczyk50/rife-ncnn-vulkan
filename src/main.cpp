@@ -184,7 +184,22 @@ static int decode_image(const path_t& imagepath, ncnn::Mat& image, int* webp)
         return -1;
     }
 
-    image = ncnn::Mat(w, h, (void*)pixeldata, (size_t)3, 3);
+    ncnn::Mat m(w, h, (void*)pixeldata, (size_t)3, 3);
+    image = m.clone();
+
+    if (*webp == 1)
+    {
+        free(pixeldata);
+    }
+    else
+    {
+#if _WIN32
+        free(pixeldata);
+#else
+        stbi_image_free(pixeldata);
+#endif
+    }
+    *webp = 0;
 
     return 0;
 }
@@ -386,38 +401,6 @@ void* save(void* args)
             break;
 
         int ret = encode_image(v.outpath, v.outimage);
-
-        // free input pixel data
-        {
-            unsigned char* pixeldata = (unsigned char*)v.in0image.data;
-            if (v.webp0 == 1)
-            {
-                free(pixeldata);
-            }
-            else
-            {
-#if _WIN32
-                free(pixeldata);
-#else
-                stbi_image_free(pixeldata);
-#endif
-            }
-        }
-        {
-            unsigned char* pixeldata = (unsigned char*)v.in1image.data;
-            if (v.webp1 == 1)
-            {
-                free(pixeldata);
-            }
-            else
-            {
-#if _WIN32
-                free(pixeldata);
-#else
-                stbi_image_free(pixeldata);
-#endif
-            }
-        }
 
         if (ret == 0)
         {
@@ -911,7 +894,6 @@ int main(int argc, char** argv)
         rife.clear();
     }
 
-    ncnn::destroy_gpu_instance();
-
-    return 0;
+    fflush(stdout);
+    _exit(0);
 }
