@@ -34,6 +34,8 @@ typedef int sock_t;
 #define closesocket close
 #endif
 
+#define RIFE_NET_MAGIC 0x52494645 // "RIFE" in ASCII
+
 // protocol message types
 enum MsgType : uint32_t {
     MSG_HELLO       = 1, // worker -> master: worker announces itself
@@ -48,6 +50,7 @@ enum MsgType : uint32_t {
 #pragma pack(push, 1)
 
 struct MsgHeader {
+    uint32_t magic;      // RIFE_NET_MAGIC
     uint32_t msg_type;
     uint32_t body_len;
 };
@@ -86,6 +89,26 @@ struct ResultMsg {
 
 // maximum message body size sanity limit (512 MB)
 #define MAX_MSG_BODY_LEN (512 * 1024 * 1024)
+
+// set low-latency TCP_NODELAY, SO_KEEPALIVE, and send/recv timeouts
+static inline void sock_set_options(sock_t fd, int timeout_seconds = 15)
+{
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
+
+#ifdef _WIN32
+    DWORD timeout_ms = (DWORD)(timeout_seconds * 1000);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
+    struct timeval tv;
+    tv.tv_sec = timeout_seconds;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+#endif
+}
 
 // send exactly len bytes, handles partial writes and signal interruptions
 static inline int sock_send_all(sock_t fd, const void* buf, int len)
@@ -129,6 +152,7 @@ static inline int sock_recv_all(sock_t fd, void* buf, int len)
 static inline int sock_send_msg(sock_t fd, uint32_t msg_type, const void* body, uint32_t body_len)
 {
     MsgHeader hdr;
+    hdr.magic = RIFE_NET_MAGIC;
     hdr.msg_type = msg_type;
     hdr.body_len = body_len;
     if (sock_send_all(fd, &hdr, sizeof(hdr)) < 0) return -1;
@@ -147,6 +171,9 @@ static inline int sock_recv_msg(sock_t fd, uint32_t* msg_type, void** body, uint
 
     MsgHeader hdr;
     if (sock_recv_all(fd, &hdr, sizeof(hdr)) < 0) return -1;
+    if (hdr.magic != RIFE_NET_MAGIC) {
+        return -1; // reject non-RIFE protocol / port scanners
+    }
     if (hdr.body_len > MAX_MSG_BODY_LEN) return -1; // sanity limit check
 
     *msg_type = hdr.msg_type;
@@ -196,8 +223,7 @@ static inline sock_t sock_connect(const char* host, int port)
 
     freeaddrinfo(res);
 
-    int yes = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
+    sock_set_options(fd, 15);
     return fd;
 }
 
@@ -240,8 +266,7 @@ static inline sock_t sock_accept(sock_t listen_fd, char* client_ip = NULL, int m
 #endif
     sock_t fd = accept(listen_fd, (struct sockaddr*)&addr, &addrlen);
     if (fd != SOCK_INVALID) {
-        int yes = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
+        sock_set_options(fd, 15);
         if (client_ip && max_ip_len > 0) {
             inet_ntop(AF_INET, &addr.sin_addr, client_ip, max_ip_len);
         }

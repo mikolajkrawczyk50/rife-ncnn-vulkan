@@ -524,6 +524,7 @@ int main(int argc, char** argv)
                     }
 
                     std::vector<int> in_flight;
+                    std::vector<unsigned char> job_buf;
 
                     while (g_running && !all_done) {
                         int task_id = -1;
@@ -555,34 +556,28 @@ int main(int argc, char** argv)
 
                         int frame_bytes = w0 * h0 * 3;
                         uint32_t body_size = sizeof(SubmitJobMsg) + frame_bytes * 2;
-                        unsigned char* job_buf = (unsigned char*)malloc(body_size);
-                        if (!job_buf) {
-                            free(in0_pixels);
-                            free(in1_pixels);
-                            task_pool.requeue_front({task_id});
-                            break;
+                        if (job_buf.size() < body_size) {
+                            job_buf.resize(body_size);
                         }
 
-                        SubmitJobMsg* hdr = (SubmitJobMsg*)job_buf;
+                        SubmitJobMsg* hdr = (SubmitJobMsg*)job_buf.data();
                         hdr->task_id = (uint32_t)task_id;
                         hdr->width = (uint32_t)w0;
                         hdr->height = (uint32_t)h0;
                         hdr->channels = 3;
                         hdr->timestep = task.timestep;
 
-                        memcpy(job_buf + sizeof(SubmitJobMsg), in0_pixels, frame_bytes);
-                        memcpy(job_buf + sizeof(SubmitJobMsg) + frame_bytes, in1_pixels, frame_bytes);
+                        memcpy(job_buf.data() + sizeof(SubmitJobMsg), in0_pixels, frame_bytes);
+                        memcpy(job_buf.data() + sizeof(SubmitJobMsg) + frame_bytes, in1_pixels, frame_bytes);
 
                         free(in0_pixels);
                         free(in1_pixels);
 
                         in_flight.push_back(task_id);
 
-                        if (sock_send_msg(worker_fd, MSG_SUBMIT_JOB, job_buf, body_size) < 0) {
-                            free(job_buf);
+                        if (sock_send_msg(worker_fd, MSG_SUBMIT_JOB, job_buf.data(), body_size) < 0) {
                             break; // socket error, handle below
                         }
-                        free(job_buf);
 
                         // receive result
                         uint32_t res_type = 0;
