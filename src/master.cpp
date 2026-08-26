@@ -470,168 +470,168 @@ int main(int argc, char** argv)
                 continue;
             }
 
-            fprintf(stderr, "worker joined from %s\n", worker_ip);
-
-            // recv HELLO
-            uint32_t msg_type = 0;
-            void* body = NULL;
-            uint32_t body_len = 0;
-
-            if (sock_recv_msg(worker_fd, &msg_type, &body, &body_len) < 0 || msg_type != MSG_HELLO) {
-                fprintf(stderr, "failed to get HELLO from worker %s\n", worker_ip);
-                if (body) free(body);
-                closesocket(worker_fd);
-                continue;
-            }
-            if (body) free(body);
-
-            // send CONFIG
-            ConfigMsg cfg;
-            memset(&cfg, 0, sizeof(cfg));
-            cfg.tta_mode = tta_mode;
-            cfg.tta_temporal_mode = tta_temporal_mode;
-            cfg.uhd_mode = uhd_mode;
-            cfg.rife_v2 = rife_v2 ? 1 : 0;
-            cfg.rife_v4 = rife_v4 ? 1 : 0;
-#if _WIN32
-            wcstombs(cfg.model_dir, model.c_str(), sizeof(cfg.model_dir) - 1);
-#else
-            strncpy(cfg.model_dir, model.c_str(), sizeof(cfg.model_dir) - 1);
-#endif
-
-            if (sock_send_msg(worker_fd, MSG_CONFIG, &cfg, sizeof(cfg)) < 0) {
-                fprintf(stderr, "failed to send CONFIG to worker %s\n", worker_ip);
-                closesocket(worker_fd);
-                continue;
-            }
-
-            // recv READY
-            if (sock_recv_msg(worker_fd, &msg_type, &body, &body_len) < 0 || msg_type != MSG_READY) {
-                fprintf(stderr, "worker %s failed to get READY\n", worker_ip);
-                if (body) free(body);
-                closesocket(worker_fd);
-                continue;
-            }
-            if (body) free(body);
-
-            fprintf(stderr, "worker %s ready, assigning work...\n", worker_ip);
-
+            // spawn handler thread for this worker immediately to avoid blocking listener during model load
             {
                 std::lock_guard<std::mutex> lk(workers_mtx);
-                active_worker_sockets.push_back(worker_fd);
-            }
+                worker_threads.emplace_back([&, worker_fd, worker_ip_str = std::string(worker_ip)]() {
+                    // recv HELLO
+                    uint32_t msg_type = 0;
+                    void* body = NULL;
+                    uint32_t body_len = 0;
 
-            // spawn handler thread for this worker
-            worker_threads.emplace_back([&, worker_fd, worker_ip_str = std::string(worker_ip)]() {
-                std::vector<int> in_flight;
+                    if (sock_recv_msg(worker_fd, &msg_type, &body, &body_len) < 0 || msg_type != MSG_HELLO) {
+                        fprintf(stderr, "failed to get HELLO from worker %s\n", worker_ip_str.c_str());
+                        if (body) { free(body); body = NULL; }
+                        closesocket(worker_fd);
+                        return;
+                    }
+                    if (body) { free(body); body = NULL; }
 
-                while (g_running && !all_done) {
-                    int task_id = -1;
-                    if (!task_pool.pop(task_id)) {
-                        // no tasks currently pending, wait briefly or check if done
-                        if (completed_count >= total_tasks) break;
-#ifdef _WIN32
-                        Sleep(50);
+                    // send CONFIG
+                    ConfigMsg cfg;
+                    memset(&cfg, 0, sizeof(cfg));
+                    cfg.tta_mode = tta_mode;
+                    cfg.tta_temporal_mode = tta_temporal_mode;
+                    cfg.uhd_mode = uhd_mode;
+                    cfg.rife_v2 = rife_v2 ? 1 : 0;
+                    cfg.rife_v4 = rife_v4 ? 1 : 0;
+#if _WIN32
+                    wcstombs(cfg.model_dir, model.c_str(), sizeof(cfg.model_dir) - 1);
 #else
-                        usleep(50000);
+                    strncpy(cfg.model_dir, model.c_str(), sizeof(cfg.model_dir) - 1);
 #endif
-                        continue;
+
+                    if (sock_send_msg(worker_fd, MSG_CONFIG, &cfg, sizeof(cfg)) < 0) {
+                        fprintf(stderr, "failed to send CONFIG to worker %s\n", worker_ip_str.c_str());
+                        closesocket(worker_fd);
+                        return;
                     }
 
-                    const MasterTask& task = all_tasks[task_id];
+                    // recv READY
+                    if (sock_recv_msg(worker_fd, &msg_type, &body, &body_len) < 0 || msg_type != MSG_READY) {
+                        fprintf(stderr, "worker %s failed to get READY\n", worker_ip_str.c_str());
+                        if (body) { free(body); body = NULL; }
+                        closesocket(worker_fd);
+                        return;
+                    }
+                    if (body) { free(body); body = NULL; }
 
-                    unsigned char* in0_pixels = NULL;
-                    unsigned char* in1_pixels = NULL;
-                    int w0 = 0, h0 = 0, w1 = 0, h1 = 0;
+                    fprintf(stderr, "worker %s ready, assigning work...\n", worker_ip_str.c_str());
 
-                    if (decode_image_to_rgb(task.in0path, &in0_pixels, &w0, &h0) != 0 ||
-                        decode_image_to_rgb(task.in1path, &in1_pixels, &w1, &h1) != 0 ||
-                        w0 != w1 || h0 != h1) {
-                        fprintf(stderr, "error decoding frames for task %d\n", task_id);
-                        if (in0_pixels) free(in0_pixels);
-                        if (in1_pixels) free(in1_pixels);
-                        continue;
+                    {
+                        std::lock_guard<std::mutex> lk(workers_mtx);
+                        active_worker_sockets.push_back(worker_fd);
                     }
 
-                    int frame_bytes = w0 * h0 * 3;
-                    uint32_t body_size = sizeof(SubmitJobMsg) + frame_bytes * 2;
-                    unsigned char* job_buf = (unsigned char*)malloc(body_size);
-                    if (!job_buf) {
+                    std::vector<int> in_flight;
+
+                    while (g_running && !all_done) {
+                        int task_id = -1;
+                        if (!task_pool.pop(task_id)) {
+                            // no tasks currently pending, wait briefly or check if done
+                            if (completed_count >= total_tasks) break;
+#ifdef _WIN32
+                            Sleep(50);
+#else
+                            usleep(50000);
+#endif
+                            continue;
+                        }
+
+                        const MasterTask& task = all_tasks[task_id];
+
+                        unsigned char* in0_pixels = NULL;
+                        unsigned char* in1_pixels = NULL;
+                        int w0 = 0, h0 = 0, w1 = 0, h1 = 0;
+
+                        if (decode_image_to_rgb(task.in0path, &in0_pixels, &w0, &h0) != 0 ||
+                            decode_image_to_rgb(task.in1path, &in1_pixels, &w1, &h1) != 0 ||
+                            w0 != w1 || h0 != h1) {
+                            fprintf(stderr, "error decoding frames for task %d\n", task_id);
+                            if (in0_pixels) free(in0_pixels);
+                            if (in1_pixels) free(in1_pixels);
+                            continue;
+                        }
+
+                        int frame_bytes = w0 * h0 * 3;
+                        uint32_t body_size = sizeof(SubmitJobMsg) + frame_bytes * 2;
+                        unsigned char* job_buf = (unsigned char*)malloc(body_size);
+                        if (!job_buf) {
+                            free(in0_pixels);
+                            free(in1_pixels);
+                            task_pool.requeue_front({task_id});
+                            break;
+                        }
+
+                        SubmitJobMsg* hdr = (SubmitJobMsg*)job_buf;
+                        hdr->task_id = (uint32_t)task_id;
+                        hdr->width = (uint32_t)w0;
+                        hdr->height = (uint32_t)h0;
+                        hdr->channels = 3;
+                        hdr->timestep = task.timestep;
+
+                        memcpy(job_buf + sizeof(SubmitJobMsg), in0_pixels, frame_bytes);
+                        memcpy(job_buf + sizeof(SubmitJobMsg) + frame_bytes, in1_pixels, frame_bytes);
+
                         free(in0_pixels);
                         free(in1_pixels);
-                        task_pool.requeue_front({task_id});
-                        break;
-                    }
 
-                    SubmitJobMsg* hdr = (SubmitJobMsg*)job_buf;
-                    hdr->task_id = (uint32_t)task_id;
-                    hdr->width = (uint32_t)w0;
-                    hdr->height = (uint32_t)h0;
-                    hdr->channels = 3;
-                    hdr->timestep = task.timestep;
+                        in_flight.push_back(task_id);
 
-                    memcpy(job_buf + sizeof(SubmitJobMsg), in0_pixels, frame_bytes);
-                    memcpy(job_buf + sizeof(SubmitJobMsg) + frame_bytes, in1_pixels, frame_bytes);
-
-                    free(in0_pixels);
-                    free(in1_pixels);
-
-                    in_flight.push_back(task_id);
-
-                    if (sock_send_msg(worker_fd, MSG_SUBMIT_JOB, job_buf, body_size) < 0) {
+                        if (sock_send_msg(worker_fd, MSG_SUBMIT_JOB, job_buf, body_size) < 0) {
+                            free(job_buf);
+                            break; // socket error, handle below
+                        }
                         free(job_buf);
-                        break; // socket error, handle below
-                    }
-                    free(job_buf);
 
-                    // receive result
-                    uint32_t res_type = 0;
-                    void* res_body = NULL;
-                    uint32_t res_len = 0;
+                        // receive result
+                        uint32_t res_type = 0;
+                        void* res_body = NULL;
+                        uint32_t res_len = 0;
 
-                    if (sock_recv_msg(worker_fd, &res_type, &res_body, &res_len) < 0 || res_type != MSG_JOB_RESULT) {
-                        if (res_body) free(res_body);
-                        break; // worker dropped
-                    }
+                        if (sock_recv_msg(worker_fd, &res_type, &res_body, &res_len) < 0 || res_type != MSG_JOB_RESULT) {
+                            if (res_body) { free(res_body); res_body = NULL; }
+                            break; // worker dropped
+                        }
 
-                    ResultMsg* res_hdr = (ResultMsg*)res_body;
-                    if (res_hdr->ret != 0 || res_len < sizeof(ResultMsg) + (uint32_t)frame_bytes) {
-                        fprintf(stderr, "worker returned error %d for task %d\n", res_hdr->ret, task_id);
-                        free(res_body);
-                        break;
-                    }
+                        ResultMsg* res_hdr = (ResultMsg*)res_body;
+                        if (res_hdr->ret != 0 || res_len < sizeof(ResultMsg) + (uint32_t)frame_bytes) {
+                            fprintf(stderr, "worker returned error %d for task %d\n", res_hdr->ret, task_id);
+                            if (res_body) { free(res_body); res_body = NULL; }
+                            break;
+                        }
 
-                    // remove from in_flight
-                    for (auto it = in_flight.begin(); it != in_flight.end(); ++it) {
-                        if (*it == task_id) {
-                            in_flight.erase(it);
+                        // remove from in_flight
+                        for (auto it = in_flight.begin(); it != in_flight.end(); ++it) {
+                            if (*it == task_id) {
+                                in_flight.erase(it);
+                                break;
+                            }
+                        }
+
+                        // send to save queue
+                        SaveTask st;
+                        st.id = task_id;
+                        st.outpath = task.outpath;
+                        st.in0path = task.in0path;
+                        st.in1path = task.in1path;
+                        st.timestep = task.timestep;
+                        st.width = w0;
+                        st.height = h0;
+                        st.is_sentinel = false;
+
+                        st.pixels = (unsigned char*)malloc(frame_bytes);
+                        if (st.pixels) {
+                            memcpy(st.pixels, (unsigned char*)res_body + sizeof(ResultMsg), frame_bytes);
+                            save_queue.put(st);
+                        }
+                        if (res_body) { free(res_body); res_body = NULL; }
+
+                        if (completed_count >= total_tasks) {
+                            all_done = true;
                             break;
                         }
                     }
-
-                    // send to save queue
-                    SaveTask st;
-                    st.id = task_id;
-                    st.outpath = task.outpath;
-                    st.in0path = task.in0path;
-                    st.in1path = task.in1path;
-                    st.timestep = task.timestep;
-                    st.width = w0;
-                    st.height = h0;
-                    st.is_sentinel = false;
-
-                    st.pixels = (unsigned char*)malloc(frame_bytes);
-                    if (st.pixels) {
-                        memcpy(st.pixels, (unsigned char*)res_body + sizeof(ResultMsg), frame_bytes);
-                        save_queue.put(st);
-                    }
-                    free(res_body);
-
-                    if (completed_count >= total_tasks) {
-                        all_done = true;
-                        break;
-                    }
-                }
 
                 // If any tasks were in-flight when worker dropped, re-queue them!
                 if (!in_flight.empty()) {
@@ -640,8 +640,19 @@ int main(int argc, char** argv)
                     task_pool.requeue_front(in_flight);
                 }
 
+                {
+                    std::lock_guard<std::mutex> lk(workers_mtx);
+                    for (auto it = active_worker_sockets.begin(); it != active_worker_sockets.end(); ++it) {
+                        if (*it == worker_fd) {
+                            active_worker_sockets.erase(it);
+                            break;
+                        }
+                    }
+                }
+
                 closesocket(worker_fd);
             });
+            }
         }
     });
 

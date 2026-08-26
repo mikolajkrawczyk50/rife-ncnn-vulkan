@@ -141,6 +141,10 @@ static inline int sock_send_msg(sock_t fd, uint32_t msg_type, const void* body, 
 // recv a message: returns msg_type, allocates *body (caller must free if body_len > 0)
 static inline int sock_recv_msg(sock_t fd, uint32_t* msg_type, void** body, uint32_t* body_len)
 {
+    if (body) *body = NULL;
+    if (msg_type) *msg_type = 0;
+    if (body_len) *body_len = 0;
+
     MsgHeader hdr;
     if (sock_recv_all(fd, &hdr, sizeof(hdr)) < 0) return -1;
     if (hdr.body_len > MAX_MSG_BODY_LEN) return -1; // sanity limit check

@@ -1,3 +1,5 @@
 build/
 outputs/
 test_outputs/
+*.webm
+inputs/
